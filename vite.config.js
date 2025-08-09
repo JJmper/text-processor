@@ -6,6 +6,7 @@ export default defineConfig({
     vue()
   ],
   server: {
+    allowedHosts: ['text_process.jmper.cn'],
     port: 3000
   }
 }) 
