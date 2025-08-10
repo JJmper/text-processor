@@ -44,7 +44,8 @@
               </a-button>
               <template #overlay>
                 <a-menu @click="handleProcessMenuClick">
-                  <a-menu-item key="call-api">调用处理接口</a-menu-item>
+                  <a-menu-item key="call-api">调用处理接口（含AI）</a-menu-item>
+                  <a-menu-item key="call-api-no-ai">调用处理接口（不含AI）</a-menu-item>
                   <a-sub-menu key="traditional" title="转成繁体">
                     <a-menu-item key="s2t">s2t（简体→繁体）</a-menu-item>
                     <a-menu-item key="s2tw">s2tw（简体→繁体-台湾）</a-menu-item>
@@ -54,7 +55,6 @@
                   <a-sub-menu key="simplified" title="转成简体">
                     <a-menu-item key="t2s">t2s（繁体→简体）</a-menu-item>
                   </a-sub-menu>
-                  <a-menu-item key="detect-titles">动态识别标题</a-menu-item>
                 </a-menu>
               </template>
             </a-dropdown>
@@ -70,7 +70,68 @@
         
         
         <!-- 文本编辑区域（Ace Editor） -->
-        <div class="editor-container" ref="editorContainerRef"></div>
+        <div class="editor-wrapper">
+          <div class="editor-container" ref="editorContainerRef"></div>
+          <div class="stats-panel">
+            <div class="stats-panel-header">
+              <a-menu 
+                mode="horizontal" 
+                :selected-keys="[currentPanel]" 
+                @click="switchPanel"
+                class="panel-menu"
+              >
+                <a-menu-item key="long-lines">
+                  <span>长句统计</span>
+                  <a-tag color="orange" style="margin-left: 4px;">{{ longLinesCount }}</a-tag>
+                </a-menu-item>
+                <a-menu-item key="title-numbers">
+                  <span>标题编号</span>
+                  <a-tag color="blue" style="margin-left: 4px;">{{ titleNumbersCount }}</a-tag>
+                </a-menu-item>
+              </a-menu>
+            </div>
+            
+            <!-- 长句统计面板 -->
+            <div v-if="currentPanel === 'long-lines'" class="panel-content">
+              <div class="long-lines-list">
+                <div 
+                  v-for="line in longLines" 
+                  :key="line.lineNumber"
+                  class="long-line-item"
+                  @click="scrollToLine(line.lineNumber)"
+                  :title="`点击跳转到第 ${line.lineNumber + 1} 行`"
+                >
+                  <span class="line-number">{{ line.lineNumber + 1 }}</span>
+                  <span class="line-preview">{{ line.preview }}</span>
+                  <span class="line-length">{{ line.length }}字</span>
+                </div>
+                <div v-if="longLines.length === 0" class="no-data">
+                  没有超过35字的行
+                </div>
+              </div>
+            </div>
+            
+            <!-- 标题编号推测面板 -->
+            <div v-if="currentPanel === 'title-numbers'" class="panel-content">
+              <div class="title-numbers-list">
+                <div 
+                  v-for="title in titleNumbers" 
+                  :key="title.lineNumber"
+                  class="title-item"
+                  @click="scrollToLine(title.lineNumber)"
+                  :title="`点击跳转到第 ${title.lineNumber + 1} 行`"
+                >
+                  <span class="title-number">{{ title.number }}</span>
+                  <span class="title-text">{{ title.text }}</span>
+                  <span class="title-type">{{ title.type }}</span>
+                </div>
+                <div v-if="titleNumbers.length === 0" class="no-data">
+                  没有检测到标题编号
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         
         <!-- 统计信息 -->
         <div class="stats" style="margin-top: 16px">
@@ -86,7 +147,7 @@
   </template>
   
   <script>
-  import { ref, computed, h, nextTick, watch, onMounted, onUnmounted } from 'vue'
+  import { ref, h, nextTick, watch, onMounted, onUnmounted } from 'vue'
   import ace from 'ace-builds/src-noconflict/ace'
   import 'ace-builds/src-noconflict/ext-language_tools'
   import 'ace-builds/src-noconflict/theme-textmate'
@@ -96,8 +157,6 @@
     UploadOutlined, 
     DownloadOutlined, 
     DeleteOutlined,
-    SearchOutlined,
-    EditOutlined,
     ToolOutlined,
     DownOutlined
   } from '@ant-design/icons-vue'
@@ -112,7 +171,7 @@
       const fileName = ref('')
       const editorContainerRef = ref(null)
       const editorInstance = ref(null)
-      const fileInputRef = ref(null)
+
       
       // 撤销功能
       const textHistory = ref([])
@@ -134,6 +193,11 @@
       const charCount = ref(0)
       const lineCount = ref(0)
       const wordCount = ref(0)
+      const longLines = ref([])
+      const longLinesCount = ref(0)
+      const titleNumbers = ref([])
+      const titleNumbersCount = ref(0)
+      const currentPanel = ref('long-lines')
       let updateStatsTimer = null
       const recomputeWordCount = (text) => {
         if (!text) return 0
@@ -163,6 +227,11 @@
         }
         lineCount.value = text ? count + 1 : 0
         wordCount.value = recomputeWordCount(text)
+        
+        // 分析长句
+        analyzeLongLines(text)
+        // 分析标题编号
+        analyzeTitleNumbers(text)
       }
       const scheduleUpdateStats = () => {
         if (updateStatsTimer) clearTimeout(updateStatsTimer)
@@ -288,7 +357,7 @@
       }
       
       // 滚动到匹配位置
-      const scrollToMatch = () => {}
+
       
       // 查找下一个
       const findNext = () => {
@@ -374,6 +443,124 @@
       }
       
       // 使用 Ace 的标记系统为匹配结果着色
+      
+      // 分析长句（超过35字的行）
+      const analyzeLongLines = (text) => {
+        if (!text) {
+          longLines.value = []
+          longLinesCount.value = 0
+          return
+        }
+        
+        const lines = text.split('\n')
+        const longLinesData = []
+        
+        lines.forEach((line, index) => {
+          const length = line.length
+          if (length > 35) {
+            const preview = line.substring(0, 5) + (line.length > 5 ? '...' : '')
+            longLinesData.push({
+              lineNumber: index,
+              length: length,
+              preview: preview,
+              fullText: line
+            })
+          }
+        })
+        
+        longLines.value = longLinesData
+        longLinesCount.value = longLinesData.length
+      }
+      
+      // 分析标题编号
+      const analyzeTitleNumbers = (text) => {
+        console.log('analyzeTitleNumbers called with text:', text.substring(0, 100) + '...')
+        if (!text) {
+          titleNumbers.value = []
+          titleNumbersCount.value = 0
+          return
+        }
+        
+        const lines = text.split('\n')
+        const titleNumbersData = []
+        
+        lines.forEach((line, index) => {
+          const trimmedLine = line.trim()
+          if (!trimmedLine) return
+          
+          // 检测各种标题编号格式
+          const patterns = [
+            // 第X章/节/部/卷/篇/回
+            { regex: /^第([一二三四五六七八九十百千万\d]+)[章节部卷篇回]$/, type: '章节' },
+            // 数字编号：1. 2. 3. 等
+            { regex: /^(\d+)[\.、]?$/, type: '数字' },
+            // 中文数字编号：一、二、三、等
+            { regex: /^([一二三四五六七八九十百千万]+)、$/, type: '中文' },
+            // 字母编号：A. B. C. 等
+            { regex: /^([A-Z])$/, type: '字母' },
+            // 罗马数字：I. II. III. 等
+            { regex: /^([IVX]+)$/, type: '罗马' },
+            // 括号编号：(1) (2) (3) 等
+            { regex: /^\((\d+)\)$/, type: '括号' },
+            // 方括号编号：[1] [2] [3] 等
+            { regex: /^\[(\d+)\]$/, type: '方括号' }
+          ]
+          
+          for (const pattern of patterns) {
+            const match = trimmedLine.match(pattern.regex)
+            if (match) {
+              console.log('Found title number match:', { line: trimmedLine, type: pattern.type, number: match[1] })
+              titleNumbersData.push({
+                lineNumber: index,
+                number: match[1],
+                text: match[2] ? (match[2].substring(0, 20) + (match[2].length > 20 ? '...' : '')) : '',
+                type: pattern.type,
+                fullText: trimmedLine
+              })
+              break
+            }
+          }
+        })
+        
+        titleNumbers.value = titleNumbersData
+        titleNumbersCount.value = titleNumbersData.length
+      }
+      
+      // 切换面板
+      const switchPanel = ({ key }) => {
+        currentPanel.value = key
+      }
+      
+      // 滚动到指定行
+      const scrollToLine = (lineNumber) => {
+        if (!editorInstance.value) return
+        
+        try {
+          // 滚动到指定行，居中显示
+          editorInstance.value.scrollToLine(lineNumber, true, true, () => {})
+          // 将光标移动到该行
+          editorInstance.value.gotoLine(lineNumber + 1, 0, true)
+          // 高亮该行（临时）
+          const session = editorInstance.value.getSession()
+          const Range = ace.require('ace/range').Range
+          const marker = session.addMarker(
+            new Range(lineNumber, 0, lineNumber, 1),
+            'ace-highlight-line',
+            'fullLine',
+            false
+          )
+          
+          // 2秒后移除高亮
+          setTimeout(() => {
+            session.removeMarker(marker)
+          }, 2000)
+          
+          message.info(`已跳转到第 ${lineNumber + 1} 行`)
+        } catch (error) {
+          console.error('滚动到指定行失败:', error)
+          message.error('跳转失败')
+        }
+      }
       
       // 聚焦到搜索框
       const focusSearch = () => {
@@ -494,20 +681,7 @@
         return false // 阻止自动上传
       }
       
-      // 触发文件选择
-      const triggerFileInput = () => {
-        fileInputRef.value?.click()
-      }
-      
-      // 处理文件输入变化
-      const handleFileInputChange = (event) => {
-        const file = event.target.files?.[0]
-        if (file) {
-          handleFileUpload(file)
-          // 清空input值，允许重复选择同一文件
-          event.target.value = ''
-        }
-      }
+
       
       // 下载文件
       const downloadFile = () => {
@@ -535,7 +709,10 @@
       const handleProcessMenuClick = ({ key }) => {
         switch (key) {
           case 'call-api':
-            callProcessAPI()
+            callProcessAPI(true)
+            break
+          case 'call-api-no-ai':
+            callProcessAPI(false)
             break
           case 's2t':
           case 's2tw':
@@ -544,128 +721,10 @@
           case 't2s':
             applyOpenCC(key)
             break
-          case 'detect-titles':
-            detectTitles()
-            break
         }
       }
       
-      // 基础清理
-      const processBasic = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 去除多余的空行
-        processedText = processedText.replace(/\n\s*\n\s*\n/g, '\n\n')
-        // 去除行首行尾空白字符
-        processedText = processedText.split('\n').map(line => line.trim()).join('\n')
-        // 去除重复的空格
-        processedText = processedText.replace(/[ \t]+/g, ' ')
-        // 去除文件开头和结尾的空白字符
-        processedText = processedText.trim()
-        
-        updateTextWithResult(processedText, '基础清理')
-      }
-      
-      // 高级处理
-      const processAdvanced = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 统一换行符
-        processedText = processedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-        // 修复段落格式
-        processedText = processedText.replace(/\n{3,}/g, '\n\n')
-        // 去除特殊字符
-        processedText = processedText.replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s，。！？；：""''（）【】\n]/g, '')
-        // 修复标点符号
-        processedText = processedText
-          .replace(/\s+([，。！？；：""''（）【】])/g, '$1')
-          .replace(/([，。！？；：""''（）【】])\s+/g, '$1')
-          .replace(/([，。！？；：])\s*([，。！？；：])/g, '$1$2')
-        
-        updateTextWithResult(processedText, '高级处理')
-      }
-      
-      // 格式化
-      const processFormat = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 统一段落间距
-        processedText = processedText.replace(/\n\s*\n/g, '\n\n')
-        // 确保段落间有适当间距
-        processedText = processedText.replace(/([。！？])\n([^。！？\n])/g, '$1\n\n$2')
-        // 去除多余空格
-        processedText = processedText.replace(/[ \t]+/g, ' ')
-        // 去除行首行尾空白
-        processedText = processedText.split('\n').map(line => line.trim()).join('\n')
-        processedText = processedText.trim()
-        
-        updateTextWithResult(processedText, '格式化')
-      }
-      
-      // 去除空格
-      const removeSpaces = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 去除所有空格
-        processedText = processedText.replace(/\s+/g, '')
-        
-        updateTextWithResult(processedText, '去除空格')
-      }
-      
-      // 去除空行
-      const removeEmptyLines = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 去除空行
-        processedText = processedText.replace(/^\s*[\r\n]/gm, '')
-        processedText = processedText.replace(/\n\s*\n/g, '\n')
-        
-        updateTextWithResult(processedText, '去除空行')
-      }
-      
-      // 标点修复
-      const fixPunctuation = () => {
-        if (!textContent.value) {
-          message.warning('没有内容可处理')
-          return
-        }
-        
-        let processedText = textContent.value
-        
-        // 修复标点符号
-        processedText = processedText
-          .replace(/\s+([，。！？；：""''（）【】])/g, '$1') // 去除标点符号前的空格
-          .replace(/([，。！？；：""''（）【】])\s+/g, '$1') // 去除标点符号后的空格
-          .replace(/([，。！？；：])\s*([，。！？；：])/g, '$1$2') // 修复重复标点
-          .replace(/([，。！？；：])\s*([，。！？；：])/g, '$1$2') // 再次修复重复标点
-        
-        updateTextWithResult(processedText, '标点修复')
-      }
+
       
       // 保存到历史记录
       const saveToHistory = (text) => {
@@ -772,14 +831,15 @@
       }
       
       // 调用处理接口
-      const callProcessAPI = async () => {
+      const callProcessAPI = async (use_ai_model = true) => {
         if (!textContent.value) {
           message.warning('没有内容可处理')
           return
         }
         
         try {
-          message.loading('正在调用处理接口...', 0)
+          const loadingText = use_ai_model ? '正在调用处理接口（含AI）...' : '正在调用处理接口（不含AI）...'
+          message.loading(loadingText, 0)
           
           const response = await fetch('http://api_text_process.jmper.cn/process', {
             method: 'POST',
@@ -787,7 +847,8 @@
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              text: textContent.value
+              text: textContent.value,
+              use_ai_model: use_ai_model
             })
           })
           
@@ -798,9 +859,11 @@
           const result = await response.json()
           console.log('result', result)
           if (result.result) {
-            updateTextWithResult(result.result, '接口处理完成！')
+            const operationName = use_ai_model ? '接口处理（含AI）' : '接口处理（不含AI）'
+            updateTextWithResult(result.result, operationName)
             message.destroy()
-            message.success('接口处理完成！')
+            const successText = use_ai_model ? '接口处理完成（含AI）！' : '接口处理完成（不含AI）！'
+            message.success(successText)
           } else {
             throw new Error(result.message || '处理失败')
           }
@@ -834,7 +897,6 @@
         textContent,
         fileName,
         editorContainerRef,
-        fileInputRef,
         textHistory,
         currentHistoryIndex,
         searchText,
@@ -846,19 +908,23 @@
         charCount,
         lineCount,
         wordCount,
+        longLines,
+        longLinesCount,
+        titleNumbers,
+        titleNumbersCount,
+        currentPanel,
         handleFileUpload,
-        triggerFileInput,
-        handleFileInputChange,
         downloadFile,
         clearText,
         callProcessAPI,
-        detectTitles,
         handleProcessMenuClick,
         updateMatchCount,
         findNext,
         findPrev,
         replaceCurrent,
         replaceAll,
+        scrollToLine,
+        switchPanel,
         focusSearch,
         h
       }
@@ -884,12 +950,163 @@
     border-radius: 6px;
   }
   
+  .editor-wrapper {
+    display: flex;
+    gap: 16px;
+    height: 520px;
+  }
+  
   .editor-container {
     position: relative;
-    height: 520px;
+    flex: 1;
     border: 1px solid #f0f0f0;
     border-radius: 6px;
     overflow: hidden;
+  }
+  
+  .stats-panel {
+    width: 280px;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+  }
+  
+  .stats-panel-header {
+    padding: 0;
+    border-bottom: 1px solid #f0f0f0;
+    background: #fff;
+    border-radius: 6px 6px 0 0;
+  }
+  
+  .panel-menu {
+    border: none;
+    background: transparent;
+  }
+  
+  .panel-menu .ant-menu-item {
+    margin: 0;
+    padding: 12px 16px;
+    border-radius: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  
+  .panel-menu .ant-menu-item-selected {
+    background-color: #e6f7ff;
+    border-bottom: 2px solid #1890ff;
+  }
+  
+  .panel-content {
+    flex: 1;
+    overflow-y: auto;
+  }
+  
+  .long-lines-list {
+    padding: 8px 0;
+  }
+  
+  .long-line-item {
+    padding: 8px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #f5f5f5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background-color 0.2s;
+  }
+  
+  .long-line-item:hover {
+    background-color: #e6f7ff;
+  }
+  
+  .long-line-item:last-child {
+    border-bottom: none;
+  }
+  
+  .line-number {
+    background: #1890ff;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 24px;
+    text-align: center;
+  }
+  
+  .line-preview {
+    flex: 1;
+    font-size: 13px;
+    color: #666;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .line-length {
+    font-size: 12px;
+    color: #999;
+    font-weight: 500;
+  }
+  
+  .no-data {
+    padding: 20px 16px;
+    text-align: center;
+    color: #999;
+    font-size: 13px;
+  }
+  
+  .title-numbers-list {
+    padding: 8px 0;
+  }
+  
+  .title-item {
+    padding: 8px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #f5f5f5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background-color 0.2s;
+  }
+  
+  .title-item:hover {
+    background-color: #e6f7ff;
+  }
+  
+  .title-item:last-child {
+    border-bottom: none;
+  }
+  
+  .title-number {
+    background: #52c41a;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 24px;
+    text-align: center;
+  }
+  
+  .title-text {
+    flex: 1;
+    font-size: 13px;
+    color: #666;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .title-type {
+    font-size: 11px;
+    color: #999;
+    background: #f5f5f5;
+    padding: 1px 4px;
+    border-radius: 2px;
   }
   
   :deep(.ace-find-match) {
@@ -903,6 +1120,11 @@
     background-color: rgba(255, 100, 100, 0.45) !important;
     outline: 1px solid rgba(255, 50, 50, 0.9) !important;
     box-shadow: 0 0 6px rgba(255, 50, 50, 0.4);
+  }
+  
+  :deep(.ace-highlight-line) {
+    background-color: rgba(255, 193, 7, 0.3) !important;
+    border-left: 3px solid #ffc107;
   }
   
   @keyframes pulse {
