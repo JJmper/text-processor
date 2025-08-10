@@ -44,7 +44,7 @@
               </a-button>
               <template #overlay>
                 <a-menu @click="handleProcessMenuClick">
-                  <a-menu-item key="call-api">调用接口（占位）</a-menu-item>
+                  <a-menu-item key="call-api">调用处理接口</a-menu-item>
                   <a-sub-menu key="traditional" title="转成繁体">
                     <a-menu-item key="s2t">s2t（简体→繁体）</a-menu-item>
                     <a-menu-item key="s2tw">s2tw（简体→繁体-台湾）</a-menu-item>
@@ -535,7 +535,7 @@
       const handleProcessMenuClick = ({ key }) => {
         switch (key) {
           case 'call-api':
-            message.info('调用接口：稍后实现')
+            callProcessAPI()
             break
           case 's2t':
           case 's2tw':
@@ -771,6 +771,46 @@
         updateTextWithResult(processed, '识别标题')
       }
       
+      // 调用处理接口
+      const callProcessAPI = async () => {
+        if (!textContent.value) {
+          message.warning('没有内容可处理')
+          return
+        }
+        
+        try {
+          message.loading('正在调用处理接口...', 0)
+          
+          const response = await fetch('http://api_text_process.jmper.cn/process', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              text: textContent.value
+            })
+          })
+          
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`)
+          }
+          
+          const result = await response.json()
+          console.log('result', result)
+          if (result.result) {
+            updateTextWithResult(result.result, '接口处理完成！')
+            message.destroy()
+            message.success('接口处理完成！')
+          } else {
+            throw new Error(result.message || '处理失败')
+          }
+        } catch (error) {
+          message.destroy()
+          message.error(`接口调用失败: ${error.message}`)
+          console.error('API call error:', error)
+        }
+      }
+      
       // 重置内容：恢复为已缓存的原始文件内容（若无则清空）
       const clearText = () => {
         const contentToSet = originalContent.value || ''
@@ -811,6 +851,7 @@
         handleFileInputChange,
         downloadFile,
         clearText,
+        callProcessAPI,
         detectTitles,
         handleProcessMenuClick,
         updateMatchCount,
